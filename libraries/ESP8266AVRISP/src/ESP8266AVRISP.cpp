@@ -7,6 +7,10 @@ Original version:
     Copyright (c) 2008-2011 Randall Bohn
     If you require a license, see
         http://www.opensource.org/licenses/bsd-license.php
+
+Modified to include bit-banging functionality via selectable non-HSPI pins
+Copyright (c) 2022 Arnold Niessen
+To use non-HSPI, define AVRISP_SPI_FREQ 0 and define BB_*_PINs or set values via constructor call
 */
 
 
@@ -44,12 +48,21 @@ extern "C" {
 
 #define beget16(addr) (*addr * 256 + *(addr+1))
 
-ESP8266AVRISP::ESP8266AVRISP(uint16_t port, uint8_t reset_pin, uint32_t spi_freq, bool reset_state, bool reset_activehigh):
+ESP8266AVRISP::ESP8266AVRISP(uint16_t port, uint8_t reset_pin, uint32_t spi_freq, bool reset_state, bool reset_activehigh, uint8_t clk_pin, uint8_t mosi_pin, uint8_t miso_pin):
     _spi_freq(spi_freq), _server(WiFiServer(port)), _state(AVRISP_STATE_IDLE),
-    _reset_pin(reset_pin), _reset_state(reset_state), _reset_activehigh(reset_activehigh)
+    _reset_pin(reset_pin), _reset_state(reset_state), _reset_activehigh(reset_activehigh),
+    _clk_pin(clk_pin), _mosi_pin(mosi_pin), _miso_pin(miso_pin)
 {
     pinMode(_reset_pin, OUTPUT);
     setReset(_reset_state);
+    _use_hspi = (_spi_freq > 0);
+    if (!_use_hspi) {
+        pinMode(_clk_pin, OUTPUT);
+        pinMode(_mosi_pin, OUTPUT);
+        pinMode(_miso_pin, INPUT);
+        digitalWrite(_clk_pin, LOW);
+        digitalWrite(_mosi_pin, HIGH); // this turns blue led off on ESP12F
+    }
 }
 
 void ESP8266AVRISP::begin() {
@@ -58,9 +71,21 @@ void ESP8266AVRISP::begin() {
 
 void ESP8266AVRISP::setSpiFrequency(uint32_t freq) {
     _spi_freq = freq;
-    if (_state == AVRISP_STATE_ACTIVE) {
+    if ((_state == AVRISP_STATE_ACTIVE) && _use_hspi) {
         SPI.setFrequency(freq);
     }
+    if (_spi_freq == 0) {
+        pinMode(_clk_pin, OUTPUT);
+        pinMode(_mosi_pin, OUTPUT);
+        pinMode(_miso_pin, INPUT);
+        digitalWrite(_clk_pin, LOW);
+        digitalWrite(_mosi_pin, HIGH); // this turns blue led off on ESP12F
+    } else if (!_use_hspi) {
+        // (unusual) switch from BB to SPI; release _clk_pin and _mosi_pin
+        pinMode(_clk_pin, INPUT);
+        pinMode(_mosi_pin, INPUT);
+    }
+    _use_hspi = (_spi_freq > 0);
 }
 
 void ESP8266AVRISP::setReset(bool rst) {
@@ -78,6 +103,9 @@ AVRISPState_t ESP8266AVRISP::update() {
                 _client.setTimeout(100); // for getch()
                 _state = AVRISP_STATE_PENDING;
                 _reject_incoming();
+                if (!_use_hspi) {
+                    digitalWrite(_mosi_pin, LOW);
+                }
             }
             break;
         }
@@ -88,7 +116,11 @@ AVRISPState_t ESP8266AVRISP::update() {
                 _client.stop();
                 AVRISP_DEBUG("client disconnect");
                 if (pmode) {
-                    SPI.end();
+                    if (_use_hspi) {
+                        SPI.end();
+                    } else {
+                        digitalWrite(_mosi_pin, HIGH); // this turns off blue LED of ESP12F
+                    }
                     pmode = 0;
                 }
                 setReset(_reset_state);
@@ -138,11 +170,34 @@ void ESP8266AVRISP::fill(int n) {
     }
 }
 
+uint8_t ESP8266AVRISP::transfer(uint8_t a) {
+  uint8_t tx_byte = a;
+  uint8_t rx_byte = 0;
+  for (uint8_t i = 0; i < 8; i++) {
+    digitalWrite(_mosi_pin, ((tx_byte & 0x80) ? HIGH : LOW));
+    tx_byte <<= 1;
+    delayMicroseconds(2);
+    digitalWrite(_clk_pin, HIGH);
+    delayMicroseconds(2);
+    rx_byte <<= 1;
+    rx_byte |= digitalRead(_miso_pin);
+    digitalWrite(_clk_pin, LOW);
+  }
+  return rx_byte;
+}
+
 uint8_t ESP8266AVRISP::spi_transaction(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-    SPI.transfer(a);
-    SPI.transfer(b);
-    SPI.transfer(c);
-    return SPI.transfer(d);
+    if (_use_hspi) {
+        SPI.transfer(a);
+        SPI.transfer(b);
+        SPI.transfer(c);
+        return SPI.transfer(d);
+    } else {
+        transfer(a);
+        transfer(b);
+        transfer(c);
+        return transfer(d);
+    }
 }
 
 void ESP8266AVRISP::empty_reply() {
@@ -213,12 +268,17 @@ void ESP8266AVRISP::set_parameters() {
 }
 
 void ESP8266AVRISP::start_pmode() {
-    SPI.begin();
-    SPI.setFrequency(_spi_freq);
-    SPI.setHwCs(false);
+    if (_use_hspi) {
+        SPI.begin();
+        SPI.setFrequency(_spi_freq);
+        SPI.setHwCs(false);
 
-    // try to sync the bus
-    SPI.transfer(0x00);
+        // try to sync the bus
+        SPI.transfer(0x00);
+    } else {
+        // try to sync the bus
+        transfer(0x00);
+    }
     digitalWrite(_reset_pin, _resetLevel(false));
     delayMicroseconds(50);
     digitalWrite(_reset_pin, _resetLevel(true));
@@ -229,7 +289,11 @@ void ESP8266AVRISP::start_pmode() {
 }
 
 void ESP8266AVRISP::end_pmode() {
-    SPI.end();
+    if (_use_hspi) {
+        SPI.end();
+    } else {
+        digitalWrite(_mosi_pin, HIGH); // this turns off blue LED of ESP12F
+    }
     setReset(_reset_state);
     pmode = 0;
 }

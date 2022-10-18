@@ -7,6 +7,10 @@ Original version:
     Copyright (c) 2008-2011 Randall Bohn
     If you require a license, see
         http://www.opensource.org/licenses/bsd-license.php
+
+Modified to include bit-banging functionality via selectable non-HSPI pins
+Changes copyright (c) 2022 Arnold Niessen
+To use non-HSPI, set spi_freq to 0 and define BB_*_PINs below or select pins via constructor
 */
 
 #ifndef _ESP8266AVRISP_H
@@ -18,7 +22,13 @@ Original version:
 // #define AVRISP_ACTIVE_HIGH_RESET
 
 // SPI clock frequency in Hz
+// to select bit banging, define AVRISP_SPI_FREQ 0 here or set spi_freq to 0 via constructor
 #define AVRISP_SPI_FREQ   300e3
+
+// pin assignments for non-HSPI bit-banging
+#define BB_CLK_PIN 15 // (GPIO15 usually has a pull-down resistor)
+#define BB_MOSI_PIN 2 // (GPIO2 usually has a pull-up resistor)
+#define BB_MISO_PIN 0 // (GPIO0 usually has a pull-up resistor)
 
 // programmer states
 typedef enum {
@@ -47,7 +57,7 @@ typedef struct {
 
 class ESP8266AVRISP {
 public:
-    ESP8266AVRISP(uint16_t port, uint8_t reset_pin, uint32_t spi_freq=AVRISP_SPI_FREQ, bool reset_state=false, bool reset_activehigh=false);
+    ESP8266AVRISP(uint16_t port, uint8_t reset_pin, uint32_t spi_freq=AVRISP_SPI_FREQ, bool reset_state=false, bool reset_activehigh=false, uint8_t clk_pin=BB_CLK_PIN, uint8_t mosi_pin=BB_MOSI_PIN, uint8_t miso_pin=BB_MISO_PIN);
 
     void begin();
 
@@ -68,6 +78,7 @@ public:
     AVRISPState_t serve();
 
 protected:
+    uint8_t transfer(uint8_t a); // for non-HSPI bit banging transfer
 
     inline void _reject_incoming(void);     // reject any incoming tcp connections
 
@@ -107,8 +118,12 @@ protected:
     WiFiClient _client;
     AVRISPState_t _state;
     uint8_t _reset_pin;
+    uint8_t _clk_pin;
+    uint8_t _mosi_pin;
+    uint8_t _miso_pin;
     bool _reset_state;
     bool _reset_activehigh;
+    bool _use_hspi;
 
     // programmer settings, set by remote end
     AVRISP_parameter_t param;
